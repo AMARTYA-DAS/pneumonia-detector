@@ -1,12 +1,17 @@
 
 import streamlit as st
 import numpy as np
-import cv2
 from PIL import Image
 from ultralytics import YOLO
 import pydicom
 import io, os, tempfile
 
+# Import cv2 with a helpful error message if it fails
+try:
+    import cv2
+except ImportError:
+    st.error("OpenCV not found. Check requirements.txt has opencv-python-headless")
+    st.stop()
 st.set_page_config(page_title="Pneumonia Detector", page_icon="🫁", layout="wide")
 
 st.markdown("""
