@@ -2,7 +2,5 @@ streamlit>=1.32.0
 Pillow>=10.0.0
 numpy>=1.24.0
 pydicom>=2.4.0
-torch
-torchvision
-onnxruntime
-ultralytics
+onnxruntime>=1.16.0
+huggingface_hub>=0.20.0
