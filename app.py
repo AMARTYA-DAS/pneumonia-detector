@@ -6,6 +6,8 @@ import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
 import pydicom
+import onnxruntime as ort
+from huggingface_hub import hf_hub_download
 
 st.set_page_config(
     page_title="Pneumonia Detector",
@@ -28,19 +30,21 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Model loader ─────────────────────────────────────────────────────────────
+# ── Load ONNX model from Hugging Face ────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    from ultralytics import YOLO          # import here to avoid top-level crash
-    model_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), 'best.pt'
+    with st.spinner("Downloading model… (first load only, ~30 sec)"):
+        model_path = hf_hub_download(
+            repo_id="YOUR_HF_USERNAME/pneumonia-detector",  # ← change this
+            filename="best.onnx"
+        )
+    session = ort.InferenceSession(
+        model_path,
+        providers=['CPUExecutionProvider']
     )
-    if not os.path.exists(model_path):
-        st.error(f"❌ Model file not found: {model_path}")
-        st.stop()
-    return YOLO(model_path)
+    return session
 
-# ── Image loader ─────────────────────────────────────────────────────────────
+# ── Load image (PNG / JPG / DICOM) ───────────────────────────────────────────
 def load_image(uploaded_file):
     name = uploaded_file.name.lower()
     if name.endswith('.dcm'):
@@ -55,7 +59,65 @@ def load_image(uploaded_file):
         return img
     return Image.open(uploaded_file).convert('RGB')
 
-# ── Draw boxes with PIL only ──────────────────────────────────────────────────
+# ── Preprocess image for ONNX ─────────────────────────────────────────────────
+def preprocess(pil_img, size=640):
+    img = pil_img.resize((size, size))
+    arr = np.array(img).astype(np.float32) / 255.0
+    arr = arr.transpose(2, 0, 1)
+    arr = np.expand_dims(arr, axis=0)
+    return arr
+
+# ── Parse YOLOv8 ONNX output ──────────────────────────────────────────────────
+def parse_output(output, conf_threshold=0.25, iou_threshold=0.45, img_size=640):
+    predictions = np.squeeze(output[0])
+    predictions = predictions.T
+
+    boxes  = []
+    scores = []
+
+    for pred in predictions:
+        x_c, y_c, w, h, conf = pred
+        if conf < conf_threshold:
+            continue
+        x1 = int((x_c - w / 2) * img_size)
+        y1 = int((y_c - h / 2) * img_size)
+        x2 = int((x_c + w / 2) * img_size)
+        y2 = int((y_c + h / 2) * img_size)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(img_size, x2), min(img_size, y2)
+        boxes.append([x1, y1, x2, y2])
+        scores.append(float(conf))
+
+    if not boxes:
+        return []
+
+    # NMS
+    boxes  = np.array(boxes)
+    scores = np.array(scores)
+    order  = scores.argsort()[::-1]
+    kept   = []
+
+    while order.size > 0:
+        i = order[0]
+        kept.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(boxes[i,0], boxes[order[1:],0])
+        yy1 = np.maximum(boxes[i,1], boxes[order[1:],1])
+        xx2 = np.minimum(boxes[i,2], boxes[order[1:],2])
+        yy2 = np.minimum(boxes[i,3], boxes[order[1:],3])
+        inter = np.maximum(0, xx2-xx1) * np.maximum(0, yy2-yy1)
+        area_i = (boxes[i,2]-boxes[i,0])*(boxes[i,3]-boxes[i,1])
+        area_j = (boxes[order[1:],2]-boxes[order[1:],0]) * \
+                 (boxes[order[1:],3]-boxes[order[1:],1])
+        iou    = inter / (area_i + area_j - inter + 1e-8)
+        order  = order[1:][iou < iou_threshold]
+
+    return [{'x1': int(boxes[i,0]), 'y1': int(boxes[i,1]),
+             'x2': int(boxes[i,2]), 'y2': int(boxes[i,3]),
+             'conf': float(scores[i])} for i in kept]
+
+# ── Draw boxes with PIL ───────────────────────────────────────────────────────
 def draw_boxes(pil_img, boxes):
     img  = pil_img.copy()
     draw = ImageDraw.Draw(img)
@@ -66,36 +128,27 @@ def draw_boxes(pil_img, boxes):
                 outline=(255, 70, 70)
             )
         label = f"Pneumonia {b['conf']:.0%}"
-        lw = len(label) * 8 + 10
+        lw    = len(label) * 8 + 10
         draw.rectangle(
             [b['x1'], b['y1']-28, b['x1']+lw, b['y1']],
             fill=(255, 70, 70)
         )
         draw.text((b['x1']+5, b['y1']-24), label, fill=(255, 255, 255))
 
-    bar_color = (255, 70, 70) if boxes else (40, 180, 100)
+    bar_color = (255, 70, 70)  if boxes else (40, 180, 100)
     status    = "PNEUMONIA DETECTED" if boxes else "NORMAL — No Pneumonia"
     draw.rectangle([0, 0, img.width, 44], fill=bar_color)
     draw.text((12, 12), status, fill=(255, 255, 255))
     return img
 
-# ── Inference ────────────────────────────────────────────────────────────────
-def run_detection(model, pil_img, conf, iou):
+# ── Run inference ─────────────────────────────────────────────────────────────
+def run_detection(session, pil_img, conf, iou):
     img_resized = pil_img.resize((640, 640))
-    results = model.predict(
-        source=np.array(img_resized),
-        conf=conf, iou=iou, verbose=False
-    )
-    result = results[0]
-    boxes  = []
-    if result.boxes and len(result.boxes) > 0:
-        for box in result.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            boxes.append({
-                'x1': x1, 'y1': y1,
-                'x2': x2, 'y2': y2,
-                'conf': float(box.conf[0])
-            })
+    inp         = preprocess(img_resized)
+    input_name  = session.get_inputs()[0].name
+    output      = session.run(None, {input_name: inp})
+    boxes       = parse_output(output, conf_threshold=conf,
+                               iou_threshold=iou, img_size=640)
     return draw_boxes(img_resized, boxes), boxes
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -109,7 +162,7 @@ with st.sidebar:
     st.markdown("---")
     st.info("Supported formats: PNG · JPG · JPEG · DICOM (.dcm)")
 
-model = load_model()
+session = load_model()
 
 col1, col2 = st.columns(2, gap="large")
 
@@ -134,7 +187,7 @@ with col2:
     if uploaded and run_btn:
         with st.spinner("Running AI analysis…"):
             orig = load_image(uploaded)
-            result_img, boxes = run_detection(model, orig, conf, iou)
+            result_img, boxes = run_detection(session, orig, conf, iou)
 
         st.image(result_img,
                  caption="AI Analysis Result",
