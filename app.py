@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from ultralytics import YOLO
 import pydicom
 import io, os, tempfile
