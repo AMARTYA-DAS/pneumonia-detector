@@ -119,25 +119,36 @@ def parse_output(output, conf_threshold=0.25, iou_threshold=0.45, img_size=640):
 
 # ── Draw boxes with PIL ───────────────────────────────────────────────────────
 def draw_boxes(pil_img, boxes):
-    img  = pil_img.copy()
+    img  = pil_img.copy().convert('RGB')
     draw = ImageDraw.Draw(img)
+    
     for b in boxes:
+        # Draw thick rectangle border (4px thickness)
         for t in range(4):
             draw.rectangle(
-                [b['x1']+t, b['y1']+t, b['x2']-t, b['y2']-t],
+                (b['x1']+t, b['y1']+t, b['x2']-t, b['y2']-t),
                 outline=(255, 70, 70)
             )
+        # Draw label background
         label = f"Pneumonia {b['conf']:.0%}"
         lw    = len(label) * 8 + 10
         draw.rectangle(
-            [b['x1'], b['y1']-28, b['x1']+lw, b['y1']],
+            (b['x1'], max(0, b['y1']-28), b['x1']+lw, b['y1']),
             fill=(255, 70, 70)
         )
-        draw.text((b['x1']+5, b['y1']-24), label, fill=(255, 255, 255))
+        draw.text(
+            (b['x1']+5, max(0, b['y1']-24)),
+            label,
+            fill=(255, 255, 255)
+        )
 
-    bar_color = (255, 70, 70)  if boxes else (40, 180, 100)
+    # Status bar at top
+    bar_color = (255, 70, 70) if boxes else (40, 180, 100)
     status    = "PNEUMONIA DETECTED" if boxes else "NORMAL — No Pneumonia"
-    draw.rectangle([0, 0, img.width, 44], fill=bar_color)
+    draw.rectangle(
+        (0, 0, img.width, 44),
+        fill=bar_color
+    )
     draw.text((12, 12), status, fill=(255, 255, 255))
     return img
 
