@@ -35,7 +35,7 @@ st.markdown("""
 def load_model():
     with st.spinner("Downloading model… (first load only)"):
         model_path = hf_hub_download(
-            repo_id="amartya-das/pneumonia-detector",
+            repo_id="AMARTYA1005/pneumonia-detector",
             filename="best.onnx"
         )
     session = ort.InferenceSession(
